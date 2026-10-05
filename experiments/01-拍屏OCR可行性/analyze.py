@@ -72,44 +72,58 @@ def moire_score(bgr):
 
 # ── ③ 曝光
 def exposure_stats(gray):
-    over  = float((gray > 250).mean() * 100)     # 过曝占比 %
-    under = float((gray < 5).mean() * 100)       # 欠曝占比 %
-    return over, under, float(gray.mean())
+    """★ 不要用"整幅 >250 占比"当做过曝 —— 屏幕是自发光的，
+    白底本来就接近 255，那是正常的，不是过曝。
+    真正该问的是：屏幕内【黑字还在不在】。
+    返回 (过曝/对比丢失指标, 暗笔画占比, 均值)
+      - 暗笔画占比 <0.5%  => 文字被冲掉（真过曝 / 或没字）
+      - 暗笔画占比 >60%   => 屏幕太暗/欠曝
+    """
+    mu = float(gray.mean())
+    dark = float((gray < mu * 0.55).mean()) * 100   # 文字笔画占比
+    lost = max(0.0, 0.5 - dark) if dark < 0.5 else 0.0   # 只有"丢字"才算过曝
+    return lost, dark, mu
 
 # ── ③.5 自动找屏幕区域（最大亮连通域）
-def find_screen(bgr, min_area_frac=0.015):
-    """屏幕是画面里最亮的一块。返回 (x,y,w,h) 或 None"""
+def find_screen(bgr, min_area_frac=0.004, debug=False):
+    """找屏幕区域。返回 (x,y,w,h) 或 None
+
+    ★ 不能用"最大亮连通域" —— 画面里可能有更亮更大的东西（白衣服/白墙）。
+      屏幕的判据是三合一：
+        ① 亮    均值 >= 90
+        ② 有对比 标准差 >= 30   （白衣服/墙是均匀的，标准差小）
+        ③ 有笔画 内部"暗像素"占比 1%~50%  （文字的特征）
+      评分 = 均值 x 标准差（又亮又有内容）
+    实测（2026-10-05）：
+        手机屏幕 227x129 均值226.8 标准差59.5  暗笔画8.0%
+        手机屏幕 373x242 均值170.7 标准差110.6 暗笔画31.5%
+    """
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     H, W = gray.shape
-    if gray.mean() > 200:            # 整张都很亮 => 大概整幅就是屏幕
+    if gray.mean() > 200:
         return (0, 0, W, H)
     _, ot = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    n, lab, st, ce = cv2.connectedComponentsWithStats(ot, 8)
-    if n <= 1: return None
-    cands = []
+    n, lab, st, _ = cv2.connectedComponentsWithStats(ot, 8)
+    if n <= 1:
+        return None
+    best, best_score = None, -1.0
     for i in range(1, n):
         x, y, w, h, area = st[i]
-        if area < W*H*min_area_frac: continue     # 太小
-        if w < 60 or h < 40: continue
-        if not (0.25 <= w/h <= 8): continue        # 宽高比离谱的丢掉
-        # 这块区域的"亮度"要足够（屏幕是亮的）
-        if gray[y:y+h, x:x+w].mean() < 100: continue
-        cands.append((area, x, y, w, h))
-    if not cands: return None
-    cands.sort(reverse=True)
-    _, x, y, w, h = cands[0]
-    return (x, y, w, h)
-
-# ── ④ 字高：自适应二值化 → 水平投影分行 → 行内垂直投影分字
-def _segments(mask, min_len):
-    segs, s = [], None
-    for i, v in enumerate(mask):
-        if v and s is None: s = i
-        elif not v and s is not None:
-            if i - s >= min_len: segs.append((s, i))
-            s = None
-    if s is not None and len(mask) - s >= min_len: segs.append((s, len(mask)))
-    return segs
+        if area < W*H*min_area_frac: continue
+        if w < 50 or h < 40: continue
+        if not (0.35 <= w/h <= 6): continue
+        roi = gray[y:y+h, x:x+w]
+        mu, sd = float(roi.mean()), float(roi.std())
+        if mu < 90: continue                       # 不够亮
+        if sd < 30: continue                       # 太均匀 => 衣服/墙
+        dark = float((roi < mu*0.55).mean()) * 100
+        if not (1.0 <= dark <= 50.0): continue     # 没有文字笔画
+        score = mu * sd
+        if debug:
+            print(f"    候选 ({x},{y}) {w}x{h} 均值{mu:.1f} 标准差{sd:.1f} 暗笔画{dark:.1f}% 分{score:.0f}")
+        if score > best_score:
+            best_score, best = score, (x, y, w, h)
+    return best
 
 def clean_screen_bg(gray):
     """★ 关键预处理：屏幕通常是斜的，外接矩形会包进四角的黑背景。
@@ -141,49 +155,83 @@ def clean_screen_bg(gray):
     fill = int(np.clip(np.median(gray[on]), 0, 255))    # 中位数比均值更抗文字干扰
     return np.where(on, gray, fill).astype(np.uint8)
 
+def _segments(mask, min_len):
+    """把布尔数组里的连续 True 区间提取出来"""
+    segs, s0 = [], None
+    for i, v in enumerate(mask):
+        if v and s0 is None: s0 = i
+        elif not v and s0 is not None:
+            if i - s0 >= min_len: segs.append((s0, i))
+            s0 = None
+    if s0 is not None and len(mask) - s0 >= min_len: segs.append((s0, len(mask)))
+    return segs
+
 def detect_lines(gray):
-    """在【屏幕区域】内检测文字行（亮底黑字 -> Otsu 反相）"""
-    gray = clean_screen_bg(gray)              # ★ 先清掉屏幕外的暗背景
+    """在屏幕区内检测文字行。
+
+    ★ 用【连通域分析】而不是投影法：
+      投影法的"绝对像素阈值"在行间距小的图上会把两行连成一整块，
+      再被"行高上限"过滤掉 —— 这是踩过的坑（第3张实拍图）。
+      连通域法直接量每个汉字的高度，再用 y 坐标聚类分行，鲁棒得多。
+    返回 (lines, n_chars_est)
+      lines = [(y0, y1, n_chars, char_w_median), ...]
+    """
+    gray = clean_screen_bg(gray)
     _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    frac = bw.mean() / 255.0
-    if frac < 0.003 or frac > 0.6:            # Otsu 切错则退回自适应
+    if bw.mean()/255.0 < 0.003 or bw.mean()/255.0 > 0.6:
         bw = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                    cv2.THRESH_BINARY_INV, 35, 12)
     bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN,
-                          cv2.getStructuringElement(cv2.MORPH_RECT,(2,2)))
+                          cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2)))
     H, W = bw.shape
-    proj = bw.sum(axis=1) / 255.0
-    thr  = max(W * 0.004, 3)                      # 行内至少有 0.4% 宽度的笔画
-    rows = _segments(proj > thr, max(6, H//200))  # 文字行至少 6px 高
-    lines = []
-    for y0, y1 in rows:
-        # 一行文字不会占半张图；也不该 <8px
-        if y1 - y0 < 8 or y1 - y0 > H*0.30: continue
-        sub = bw[y0:y1, :]
-        pv  = sub.sum(axis=0) / 255.0
-        cols = _segments(pv > max(1, (y1-y0)*0.06), 2)
-        lh = y1 - y0
-        # ★ 合并阈值只能用【字内部笔画间隙】的量级（≈5% 字高）。
-        #   实测：汉字之间的间距是 8~15px（字高 100px）= 8~15%，
-        #   若用 35% 会把相邻汉字并成一个 —— 这是踩过的坑。
-        merged, gap_thr = [], max(2, lh * 0.05)
-        for c0, c1 in cols:
-            if merged and c0 - merged[-1][1] < gap_thr: merged[-1] = (merged[-1][0], c1)
-            else: merged.append((c0, c1))
-        ws = [c1-c0 for c0,c1 in merged if 3 <= c1-c0]
-        if not ws: continue
-        cw = float(np.median(ws))
-        # 单段宽度 / 字高：汉字≈1、数字≈0.5、标点≈0.5 -> 允许 0.3~2.0
-        if not (0.30 <= cw/lh <= 2.0): continue
-        # 用宽度估算字数（比数段更准：段宽 3 倍字高说明那里有 3 个字）
-        n_chars = int(sum(max(1, round((c1-c0)/lh)) for c0,c1 in merged))
-        # 笔画密度：文字区域的墨迹占比
-        dens = sub.sum()/255.0/(sub.size+1e-9)
-        if not (0.02 <= dens <= 0.75): continue
-        lines.append((y0, y1, n_chars, cw))
-    return lines, bw
 
-def verdict(sharp, moire, over, char_h):
+    # ── 1) 用【水平投影的谷值】切行 —— 不用固定阈值
+    #     ★ 固定阈值两头不讨好（实测踩坑）：
+    #       阈值高 -> 一行被切碎成多块；阈值低 -> 两行并成一块。
+    #     改用"投影曲线的局部极小"作为行分界，自动适应。
+    from scipy.ndimage import gaussian_filter1d
+    from scipy.signal import argrelextrema
+    proj = bw.sum(axis=1) / 255.0
+    pmax = proj.max()
+    if pmax < 3:
+        return [], bw, 0.0
+    ps = gaussian_filter1d(proj.astype(np.float64), sigma=max(1.0, H * 0.008))
+    order = max(2, int(H * 0.015))
+    mins = argrelextrema(ps, np.less_equal, order=order)[0]
+    # 只保留"明显的谷"：低于峰值 45% 且高于 0 附近（排除文字上下的空白区）
+    mins = [int(m) for m in mins if ps[m] < pmax * 0.45]
+    bounds = [0] + sorted(set(mins)) + [H]
+    bands = [(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1)]
+    bands = [(a, b) for a, b in bands if b - a >= 6 and ps[a:b].max() >= pmax * 0.10]
+    if not bands:
+        return [], bw, 0.0
+
+    # ── 2) 每个行带内：量字高（用笔画的垂直跨度）与字数
+    lines = []
+    all_h = []
+    for (y0, y1) in bands:
+        sub = bw[y0:y1, :]
+        n2, lab2, st2, cent2 = cv2.connectedComponentsWithStats(sub, 8)
+        blobs = []
+        for i in range(1, n2):
+            x, y, w, h, ar = st2[i]
+            if h < 4 or w < 3 or ar < 6: continue
+            if not (0.12 <= w / max(h, 1) <= 4.0): continue
+            blobs.append((x, y, w, h))
+        if len(blobs) < 2: continue
+        # ★ 字高 = 行内所有笔画的垂直跨度
+        #   （不要用连通域高度中位数：字越大笔画越细，汉字会断成多个小连通域）
+        y_top = min(b[1] for b in blobs)
+        y_bot = max(b[1] + b[3] for b in blobs)
+        ch = float(y_bot - y_top)
+        cw = float(np.median([b[2] for b in blobs]))
+        lines.append((y0, y1, len(blobs), cw))
+        all_h.append(ch)
+
+    char_h_all = float(np.median(all_h)) if all_h else 0.0
+    return lines, bw, char_h_all
+
+def verdict(sharp, moire, over, char_h, dark_frac=None):
     # 关键项（任一硬失败 => 直接不能 OCR）
     #   字高：低于 20px OCR 必废
     #   摩尔纹：高于 30 => 周期性干涉，OCR 也必废
@@ -218,12 +266,17 @@ def analyze_one(path, roi=None, save_annot=True, outdir=None):
         crop = img.copy(); ox,oy = 0,0
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
 
-    s  = sharpness(gray)
-    m  = moire_score(crop)
-    over, under, mean = exposure_stats(gray)
-
-    # ★ 先自动找屏幕，再在屏幕内找文字
+    # ★ 先自动找屏幕 —— 后面的清晰度/曝光/文字都在屏幕区域内算，
+    #   否则整幅的黑背景会把清晰度拉得很低、把过曝稀释掉
     scr = find_screen(crop)
+    if scr:
+        _x, _y, _w, _h = scr
+        gray_roi = gray[_y:_y+_h, _x:_x+_w]
+    else:
+        gray_roi = gray
+    s  = sharpness(gray_roi)
+    m  = moire_score(crop)
+    over, dark_frac, mean = exposure_stats(gray_roi if scr else gray)
     if scr:
         sx, sy, sw, sh = scr
         scr_frac = sw / crop.shape[1] * 100
@@ -231,12 +284,14 @@ def analyze_one(path, roi=None, save_annot=True, outdir=None):
     else:
         sx = sy = 0; sw, sh = crop.shape[1], crop.shape[0]; scr_frac = 100.0
         gray_txt = gray
-    lines_raw, bw = detect_lines(gray_txt)
+    lines_raw, bw, char_h_cc = detect_lines(gray_txt)
     # 把行坐标映射回 crop 坐标系
     lines = [(y0+sy, y1+sy, nc, cw) for (y0, y1, nc, cw) in lines_raw]
-    char_h = float(np.median([y1-y0 for y0,y1,_,_ in lines])) if lines else 0.0
+    # 字高优先用【连通域量出来的】（投影行带高度会被上下留白撑大）
+    char_h = char_h_cc if char_h_cc > 0 else (
+        float(np.median([y1-y0 for y0,y1,_,_ in lines])) if lines else 0.0)
 
-    v, items = verdict(s, m, over, char_h)
+    v, items = verdict(s, m, over, char_h, dark_frac=dark_frac)
 
     print("─"*70)
     print(f"📄 {os.path.basename(path)}   {W}x{H}" + (f"   ROI {roi}" if roi else ""))
@@ -262,10 +317,12 @@ def analyze_one(path, roi=None, save_annot=True, outdir=None):
             cv2.putText(ann,"SCREEN",(sx+4,sy+22),cv2.FONT_HERSHEY_SIMPLEX,
                         0.7,(255,180,0),2,cv2.LINE_AA)
         for y0,y1,nc,cw in lines:
-            cv2.rectangle(ann,(0,y0),(ann.shape[1]-1,y1),(0,255,0),2)
-            cv2.putText(ann,f"{y1-y0}px / ~{nc}chars",(6,max(14,y0-5)),
+            x0 = sx if scr else 0
+            x1 = (sx+sw-1) if scr else ann.shape[1]-1
+            cv2.rectangle(ann,(x0,y0),(x1,y1),(0,255,0),2)
+            cv2.putText(ann,f"{y1-y0}px / ~{nc}chars",(max(4,x0+4),max(14,y0-5)),
                         cv2.FONT_HERSHEY_SIMPLEX,0.6,(0,0,0),3,cv2.LINE_AA)
-            cv2.putText(ann,f"{y1-y0}px / ~{nc}chars",(6,max(14,y0-5)),
+            cv2.putText(ann,f"{y1-y0}px / ~{nc}chars",(max(4,x0+4),max(14,y0-5)),
                         cv2.FONT_HERSHEY_SIMPLEX,0.6,(0,255,0),1,cv2.LINE_AA)
         head=f"{v} | charH={char_h:.0f}px sharp={s:.0f} moire={m:.1f} over={over:.1f}%"
         cv2.putText(ann,head,(6,ann.shape[0]-10),cv2.FONT_HERSHEY_SIMPLEX,0.7,(0,0,0),4,cv2.LINE_AA)
