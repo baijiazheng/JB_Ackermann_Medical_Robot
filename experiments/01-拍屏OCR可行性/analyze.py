@@ -169,11 +169,11 @@ def _segments(mask, min_len):
 def detect_lines(gray):
     """在屏幕区内检测文字行。
 
-    ★ 用【连通域分析】而不是投影法：
-      投影法的"绝对像素阈值"在行间距小的图上会把两行连成一整块，
-      再被"行高上限"过滤掉 —— 这是踩过的坑（第3张实拍图）。
-      连通域法直接量每个汉字的高度，再用 y 坐标聚类分行，鲁棒得多。
-    返回 (lines, n_chars_est)
+    ★ 用【水平膨胀 + 连通域】而不是水平投影：
+      投影法在【斜拍/透视】下会失效 —— 文字 y 坐标在屏幕两端不同，
+      投影被抹平，行间谷值消失（7 张实拍图全部行数数错的根因）。
+      水平膨胀把同一行的字连成扁长条，再按连通域取行，对倾斜鲁棒。
+    返回 (lines, bw, char_h)
       lines = [(y0, y1, n_chars, char_w_median), ...]
     """
     gray = clean_screen_bg(gray)
@@ -184,52 +184,53 @@ def detect_lines(gray):
     bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN,
                           cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2)))
     H, W = bw.shape
-
-    # ── 1) 用【水平投影的谷值】切行 —— 不用固定阈值
-    #     ★ 固定阈值两头不讨好（实测踩坑）：
-    #       阈值高 -> 一行被切碎成多块；阈值低 -> 两行并成一块。
-    #     改用"投影曲线的局部极小"作为行分界，自动适应。
-    from scipy.ndimage import gaussian_filter1d
-    from scipy.signal import argrelextrema
-    proj = bw.sum(axis=1) / 255.0
-    pmax = proj.max()
-    if pmax < 3:
-        return [], bw, 0.0
-    ps = gaussian_filter1d(proj.astype(np.float64), sigma=max(1.0, H * 0.008))
-    order = max(2, int(H * 0.015))
-    mins = argrelextrema(ps, np.less_equal, order=order)[0]
-    # 只保留"明显的谷"：低于峰值 45% 且高于 0 附近（排除文字上下的空白区）
-    mins = [int(m) for m in mins if ps[m] < pmax * 0.45]
-    bounds = [0] + sorted(set(mins)) + [H]
-    bands = [(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1)]
-    bands = [(a, b) for a, b in bands if b - a >= 6 and ps[a:b].max() >= pmax * 0.10]
-    if not bands:
+    if W < 20 or H < 20:
         return [], bw, 0.0
 
-    # ── 2) 每个行带内：量字高（用笔画的垂直跨度）与字数
-    lines = []
-    all_h = []
-    for (y0, y1) in bands:
-        sub = bw[y0:y1, :]
-        n2, lab2, st2, cent2 = cv2.connectedComponentsWithStats(sub, 8)
-        blobs = []
-        for i in range(1, n2):
-            x, y, w, h, ar = st2[i]
-            if h < 4 or w < 3 or ar < 6: continue
-            if not (0.12 <= w / max(h, 1) <= 4.0): continue
-            blobs.append((x, y, w, h))
-        if len(blobs) < 2: continue
-        # ★ 字高 = 行内所有笔画的垂直跨度
-        #   （不要用连通域高度中位数：字越大笔画越细，汉字会断成多个小连通域）
-        y_top = min(b[1] for b in blobs)
-        y_bot = max(b[1] + b[3] for b in blobs)
-        ch = float(y_bot - y_top)
-        cw = float(np.median([b[2] for b in blobs]))
-        lines.append((y0, y1, len(blobs), cw))
-        all_h.append(ch)
+    # ── 1) 估计字宽：原始连通域宽度的中位数
+    n, lab, st, cent = cv2.connectedComponentsWithStats(bw, 8)
+    ws = []
+    for i in range(1, n):
+        x, y, w, h, ar = st[i]
+        if h < 4 or w < 3 or ar < 5: continue
+        if h > H * 0.5: continue
+        if not (0.1 <= w / h <= 5): continue
+        ws.append(w)
+    cw_est = float(np.median(ws)) if ws else max(8.0, W * 0.03)
 
-    char_h_all = float(np.median(all_h)) if all_h else 0.0
-    return lines, bw, char_h_all
+    # ── 2) 水平膨胀：把同一行的字连成扁长条
+    k = max(3, int(round(cw_est * 1.1)))
+    ker = cv2.getStructuringElement(cv2.MORPH_RECT, (k, 1))
+    merged = cv2.dilate(bw, ker, iterations=1)
+
+    # ── 3) 连通域 = 行；行必须"扁长"
+    n2, lab2, st2, cent2 = cv2.connectedComponentsWithStats(merged, 8)
+    lines, hs = [], []
+    for i in range(1, n2):
+        x, y, w, h, ar = st2[i]
+        if w < max(20, cw_est * 1.5) or h < 5: continue
+        if w / h < 2.2: continue                    # 行是扁长的
+        if h > H * 0.6: continue
+        # ── 4) 在原始 bw 上量这一行的字高（笔画的垂直跨度）
+        sub = bw[y:y+h, x:x+w]
+        rows_any = np.where(sub.sum(axis=1) > 0)[0]
+        if rows_any.size == 0: continue
+        y0 = y + int(rows_any.min()); y1 = y + int(rows_any.max()) + 1
+        ch = y1 - y0
+        if ch < 5: continue
+        # ── 5) 数字数：行内"够大"的连通域
+        n3, _, st3, _ = cv2.connectedComponentsWithStats(sub, 8)
+        cnt = 0
+        for j in range(1, n3):
+            _, _, w3, h3, a3 = st3[j]
+            if h3 >= ch * 0.25 and w3 >= 3 and a3 >= 6: cnt += 1
+        # 若连通域太少（笔画粘连），用宽度估算
+        n_est = max(cnt, int(round((x + w - x) / max(ch, 1))))
+        lines.append((y0, y1, max(cnt, 2), cw_est))
+        hs.append(ch)
+    lines.sort(key=lambda t: t[0])
+    char_h = float(np.median(hs)) if hs else 0.0
+    return lines, bw, char_h
 
 def verdict(sharp, moire, over, char_h, dark_frac=None):
     # 关键项（任一硬失败 => 直接不能 OCR）
@@ -284,6 +285,17 @@ def analyze_one(path, roi=None, save_annot=True, outdir=None):
     else:
         sx = sy = 0; sw, sh = crop.shape[1], crop.shape[0]; scr_frac = 100.0
         gray_txt = gray
+        # ★ 没找到屏幕时给出【明确原因】，别让用户以为"字太小"
+        gm, gsd = float(gray.mean()), float(gray.std())
+        bright = float((gray > 128).mean()) * 100
+        if gm < 40 or bright < 2:
+            diag = (f"画面太暗（均值 {gm:.0f}，亮像素仅 {bright:.1f}%）"
+                    f" -> 提高曝光，或关掉自动曝光后手动加档")
+        elif gsd < 25:
+            diag = f"画面过于平淡（标准差 {gsd:.0f}）-> 屏幕可能不在视野里"
+        else:
+            diag = "没找到像屏幕的区域 -> 让屏幕在画面里占更大比例，或用 --roi 手动框选"
+        print(f"   ⚠️ {diag}")
     lines_raw, bw, char_h_cc = detect_lines(gray_txt)
     # 把行坐标映射回 crop 坐标系
     lines = [(y0+sy, y1+sy, nc, cw) for (y0, y1, nc, cw) in lines_raw]
