@@ -29,8 +29,19 @@ constexpr uint8_t PIN_SERVO_PWM   = 5;    // OC3A，独立定时器
 // ---------- 2. I²C 总线（⚠️ 经电平转换到 3.3V）----------
 // 挂载：AS5600(0x36) + MPU6050(0x68/0x69) + hiwonder 电机模块(?)
 // 使用 Wire (D20=SDA, D21=SCL)，无需重定义，此处仅作记录
-#define I2C_ADDR_AS5600       0x36
+#define I2C_ADDR_AS5600       0x36    // 转向角传感器
 #define I2C_ADDR_MPU6050      0x68    // AD0 拉高则为 0x69
+#define I2C_ADDR_MOTOR_MODULE 0x34    // ★ hiwonder 四路编码电机模块（前代实测）
+
+// hiwonder 模块寄存器（来自 JB_AprilTag_Tracker/MotorDriverI2C.cpp）
+#define MOTOR_REG_TYPE        0x14    // 电机类型（写 3 = JGB37-520 12V）
+#define MOTOR_REG_ENC_POLAR   0x15    // 编码器方向极性
+#define MOTOR_REG_SPEED       0x33    // 四路闭环速度（4× int8, ±50）
+#define MOTOR_REG_ENC_TOTAL   0x3C    // 四路编码器累计（16B = 4× int32）
+
+// 阿克曼约束
+#define DELTA_MAX_DEG         35.0f   // 前轮最大转角
+#define SERVO_PULSE_PER_DEG   11.7f   // 脉宽斜率（由标定表拟合）
 
 // ---------- 3. 上位机通信（RDK X3）----------
 // 用 Serial1，把 Serial0(D0/D1) 留给 USB 调试
