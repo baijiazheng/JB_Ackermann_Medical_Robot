@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>jb_camera_test</name>
+  <version>0.1.0</version>
+  <description>
+    JB 阿克曼底盘 · 摄像头测试节点
+    目的：验证 RDK X3 上的 USB 摄像头能否正常取流，并测量实际帧率/分辨率。
+    这是整个视觉链路的第一步 —— 取不到流，后面 OCR/识别都无从谈起。
+  </description>
+  <maintainer email="3248428889@qq.com">jb</maintainer>
+  <license>MIT</license>
+
+  <!-- ============ 依赖说明 ============
+       rclpy        : ROS2 的 Python 客户端库
+       sensor_msgs  : 提供 Image 消息类型（相机图像的通用格式）
+       cv_bridge    : ROS Image  <->  OpenCV Mat 互转
+       python3-opencv: 本机 OpenCV（RDK 上已装）
+  ==================================== -->
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>cv_bridge</depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
