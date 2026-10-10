@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>jb_apriltag_align</name>
+  <version>0.1.0</version>
+  <description>
+    JB 阿克曼 · 最小视觉闭环（AprilTag 对准）
+    摄像头 → AprilTag 检测 → P 控制 → 串口 cmd_vel → 下位机
+  </description>
+  <maintainer email="3248428889@qq.com">jb</maintainer>
+  <license>MIT</license>
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>cv_bridge</depend>
+  <export><build_type>ament_python</build_type></export>
+</package>
